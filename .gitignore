@@ -1,2 +1,3 @@
 google_cloud_credentials.json
 captured_images/
+__pycache__/
