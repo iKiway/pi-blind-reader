@@ -1,5 +1,10 @@
 from google.cloud import vision
 import io
+import os
+import json
+from google.protobuf.json_format import MessageToDict
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/kimon/pi-blind-reader/google_cloud_credentials.json"
 
 def detect_document_text(path):
     client = vision.ImageAnnotatorClient()
@@ -50,6 +55,21 @@ def detect_document_text(path):
     # Ergebnis zusammenfügen
     final_text = "\n".join(filtered_text)
     print(final_text)
+    
+    # Save response to JSON file
+    output_data = {
+        'image_path': path,
+        'filtered_text': final_text,
+        'full_response': MessageToDict(response._pb)
+    }
+    
+    output_filename = 'vision_api_response.json'
+    with open(output_filename, 'w', encoding='utf-8') as json_file:
+        # json.dump({'filtered_text': final_text}, json_file, ensure_ascii=False, indent=2)
+        json.dump(output_data, json_file, ensure_ascii=False, indent=2)
+        
+    
+    print(f"\nResponse saved to {output_filename}")
 
 # Aufruf
-detect_document_text('captured_images/capture_20260115_210326.jpg')
+detect_document_text('captured_images/capture_20260116_215512_original.jpg')

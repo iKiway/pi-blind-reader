@@ -49,6 +49,15 @@ class CameraThread(threading.Thread):
         
         # Beispiel 1: Alles in Graustufen
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        # Rauschunterdrückung
+        # frame = cv2.medianBlur(frame, 3)
+        frame = cv2.GaussianBlur(frame, (3, 3), 0)
+        # Optional: Threshold anwenden
+        frame = cv2.adaptiveThreshold(frame, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        
+        kernel = np.ones((2, 2), np.uint8)
+        frame = cv2.morphologyEx(frame, cv2.MORPH_OPEN, kernel)
+        
         
         # Überprüfen ob das Bild scharf oder unscharf ist (Laplacian Varianz)
         laplacian_var = cv2.Laplacian(frame, cv2.CV_64F).var()
@@ -92,13 +101,32 @@ class CameraThread(threading.Thread):
             
             # Dateiname mit Timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.capture_dir}/capture_{timestamp}.jpg"
+            filename_original = f"{self.capture_dir}/capture_{timestamp}_original.jpg"
+            filename_filtered = f"{self.capture_dir}/capture_{timestamp}_filtered.jpg"
             
-            # Als RGB speichern (nicht in Graustufen für spätere Flexibilität)
+            # Bild 1: Original ohne Filter speichern
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(filename, frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            cv2.imwrite(filename_original, frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            print(f"✓ Original gespeichert: {filename_original}")
             
-            print(f"✓ Bild gespeichert: {filename}")
+            # Bild 2: Mit Filter speichern
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            # Rauschunterdrückung
+            denoised = cv2.GaussianBlur(frame_gray, (3, 3), 0)
+            # Optional: Threshold anwenden
+            frame_filtered = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+            kernel = np.ones((2, 2), np.uint8)
+            frame_filtered = cv2.morphologyEx(frame_filtered, cv2.MORPH_OPEN, kernel)
+            
+            # _, frame_filtered = cv2.threshold(frame_gray, 80, 255, cv2.THRESH_BINARY)
+            cv2.imwrite(filename_filtered, frame_filtered, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            print(f"✓ Gefiltert gespeichert: {filename_filtered}")
+            
+            # Für OCR das gefilterte Bild verwenden
+            filename = filename_filtered
+            
+            
             
             # Bild zur OCR-Queue hinzufügen, falls vorhanden
             if self.image_queue is not None:
