@@ -26,7 +26,53 @@ sudo apt update
 sudo apt install mpg321 -y
 
 
+# 🗣️ Text-to-Speech Installation (Piper)
 
+Wir nutzen **Piper TTS**, eine schnelle und lokale Text-zu-Sprache Engine für den Raspberry Pi.
+
+Führe folgende Schritte aus, um Piper sowie die deutsche und griechische Stimme zu installieren:
+
+## 1. Piper herunterladen & installieren
+
+```bash
+# Ordner erstellen
+mkdir -p ~/piper_tts
+cd ~/piper_tts
+
+# Piper für Raspberry Pi (64-bit) herunterladen
+wget https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_aarch64.tar.gz
+
+# Entpacken
+tar -xvf piper_linux_aarch64.tar.gz
+```
+
+## 2. Stimmen herunterladen
+
+### 🇩🇪 Deutsch (Thorsten)
+```bash
+wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx
+wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx.json
+```
+
+### 🇬🇷 Griechisch (Rapunzelina)
+```bash
+wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/el/el_GR/rapunzelina/medium/el_GR-rapunzelina-medium.onnx
+wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/el/el_GR/rapunzelina/medium/el_GR-rapunzelina-medium.onnx.json
+```
+
+## 3. Testen
+
+Stelle sicher, dass du im Ordner `~/piper_tts` bist.
+
+**Deutsch testen:**
+```bash
+echo "Hallo, das ist ein Test." | ./piper/piper --model de_DE-thorsten-medium.onnx --output_raw | aplay -r 22050 -f S16_LE -t raw -
+```
+
+**Griechisch testen:**
+```bash
+echo "Γεια σου, τι κάνεις;" | ./piper/piper --model el_GR-rapunzelina-medium.onnx --output_raw | aplay -r 22050 -f S16_LE -t raw -
+```
 
 
 # 🔊 Audio Setup (MAX98357A & Raspberry Pi)
@@ -195,3 +241,37 @@ mpg123 http://wdr-1live-live.icecast.wdr.de/wdr/1live/live/mp3/128/stream.mp3
 * **Verzerrter Sound (Kratzen)?**
 * Lautstärke im `alsamixer` reduzieren (max 90%).
 * Prüfen, ob die Stromversorgung des Pi stabil ist (offizielles Netzteil empfohlen).
+
+# 🔑 API Setup
+
+Dieses Projekt nutzt externe APIs für die Texterkennung und -verbesserung. Hier erfährst du, wie du die nötigen Schlüssel erhältst und einrichtest.
+
+## 1. Google Cloud Vision API (für OCR)
+
+Wir nutzen die Google Cloud Vision API für präzise Texterkennung.
+
+1.  Gehe zur [Google Cloud Console](https://console.cloud.google.com/).
+2.  Erstelle ein neues Projekt.
+3.  Suche nach **"Cloud Vision API"** und aktiviere sie für dein Projekt.
+4.  Gehe zu **IAM & Verwaltung** -> **Dienstkonten**.
+5.  Erstelle ein neues Dienstkonto und gib ihm die Rolle **"Besitzer"** (oder spezifischer "Cloud Vision API Nutzer").
+6.  Klicke auf das erstellte Dienstkonto -> **Schlüssel** -> **Schlüssel hinzufügen** -> **Neuen Schlüssel erstellen** -> **JSON**.
+7.  Eine JSON-Datei wird automatisch heruntergeladen.
+8.  Benenne diese Datei um in `google_cloud_credentials.json`.
+9.  Kopiere sie in das Hauptverzeichnis dieses Projekts (z. B. `/home/kimon/pi-blind-reader/`).
+
+## 2. OpenAI API (für Textkorrektur)
+
+OpenAI wird genutzt, um fehlerhaften OCR-Text zu korrigieren und logisch zusammenzusetzen.
+
+1.  Registriere dich bei [OpenAI Platform](https://platform.openai.com/).
+2.  Gehe zu **API Keys** und erstelle einen neuen Schlüssel (`Create new secret key`).
+3.  Kopiere den Schlüssel (er beginnt meist mit `sk-...`).
+4.  Erstelle im Projektordner eine Textdatei namens `api_key_open_ai.txt`.
+5.  Füge den Schlüssel in diese Datei ein (ohne Leerzeichen oder Anführungszeichen).
+
+```bash
+# Beispiel:
+echo "sk-DEIN_KEY_HIER" > ~/pi-blind-reader/api_key_open_ai.txt
+```
+
