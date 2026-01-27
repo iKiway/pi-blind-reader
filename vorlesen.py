@@ -22,7 +22,7 @@ with open('/home/kimon/pi-blind-reader/api_key_open_ai.txt', 'r') as f:
 # --- KONFIGURATION ---
 OUTPUT_FILE = "captured_images/scharfes_bild.jpg"
 MAX_RETRIES = 5         # Wie oft versuchen?
-SHARPNESS_THRESHOLD = 150.0  # WICHTIG: Dieser Wert muss je nach Motiv angepasst werden!
+SHARPNESS_THRESHOLD = 12.0  # WICHTIG: Dieser Wert muss je nach Motiv angepasst werden!
                              # Text/Kontrastreich: höher (z.B. 200-500)
                              # Landschaft/Wenig Kontrast: niedriger (z.B. 50-150)
 WARMUP_TIME = 2.0       # Zeit für den Autofokus, sich vor dem ersten Bild einzustellen
@@ -55,7 +55,9 @@ def take_picture():
     
     # Konfiguration für Full HD (1920x1080)
     config = picam2.create_still_configuration(main={"size": (1920, 1080)})
+    # config = picam2.create_still_configuration(main={"size": (4608, 2592)})
     picam2.configure(config)
+    read_out_offline_smart("Dokument bereit zum Fotografieren. Bitte halten Sie das Dokument ruhig.")
 
     # Kamera starten. Der Autofokus (Continuous AF) beginnt zu arbeiten.
     picam2.start()
@@ -88,6 +90,7 @@ def take_picture():
             cv2.imwrite(OUTPUT_FILE, image_array)
             print(f"Bild gespeichert unter: {OUTPUT_FILE}")
             success = True
+            read_out_offline_smart("Bild aufgenommen und wird verarbeitet. Bitte warten.")
             break # Schleife verlassen
         else:
             print("❌ Bild ist zu unscharf.")
@@ -216,7 +219,7 @@ def read_out_offline_smart(text):
         # 2. Passendes Modell wählen
         if language == 'el': # 'el' steht für Griechisch (Ellinika)
             model = MODEL_GR
-            length_scale = "1.0"  # Langsamer für Griechisch (höher = langsamer)
+            length_scale = "1.1"  # Langsamer für Griechisch (höher = langsamer)
             print("Wähle Griechische Stimme...")
         else:
             # Fallback ist immer Deutsch
@@ -242,5 +245,7 @@ def main():
     cleaned_text = extract_letter_text_with_openai(response)
     print(cleaned_text)
     read_out_offline_smart(cleaned_text)
+    read_out_offline_smart("Vorlesen beendet.")
     
 main()
+# take_picture()

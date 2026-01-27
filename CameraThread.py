@@ -36,7 +36,7 @@ class CameraThread(threading.Thread):
         print("Kamera-Thread gestartet...")
         while self.running:
             try:
-                self.filter()  # Oder self.no_filter() für keinen Filter
+                self.no_filter()  # Oder self.no_filter() für keinen Filter
 
             except Exception as e:
                 print(f"Fehler im Kamera-Thread: {e}")
