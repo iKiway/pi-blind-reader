@@ -55,9 +55,9 @@ Der Verstärker wird über den I2S-Bus (Digital Audio) angeschlossen.
 Öffne die Konfigurationsdatei:
 
 ```bash
-sudo nano /boot/config.txt
-# Bei RPi OS 'Bookworm' oder neuer:
-# sudo nano /boot/firmware/config.txt
+sudo nano /boot/firmware/config.txt
+# Bei älteren Raspbian-Versionen:
+# sudo nano /boot/config.txt
 
 ```
 
