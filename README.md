@@ -1,38 +1,45 @@
 # pi-blind-reader
-## Required libraries
-- picamera2
-- numpy
-- flask
-- gpiozero
-- pytesseract
-- Pillow
-- opencv-python
-- threading
-- queue
-- datetime
-- os
-- google-cloud-vision (optional, for Google OCR)
+## 📦 Required Libraries
 
-pytesseract requires Tesseract OCR to be installed on your system. You can install it using the following command:
+### Python Packages
+- `picamera2`
+- `numpy`
+- `flask`
+- `gpiozero`
+- `pytesseract`
+- `Pillow`
+- `opencv-python`
+- `google-cloud-vision` (optional)
 
-```bash sudo apt-get install tesseract-ocr```
+### System Dependencies
 
-You have to install the different language packs separately. For example, for Spanish, you can use:
+**1. Tesseract OCR** (Required for OCR offline fallback)
+```bash
+sudo apt-get install tesseract-ocr
+```
+*For Greek support:*
+```bash
+sudo apt-get install tesseract-ocr-ell
+```
 
-```bash sudo apt-get install tesseract-ocr-ell```
-
-
+**2. Audio Player** (Required for playback)
+```bash
 sudo apt update
 sudo apt install mpg321 -y
+```
 
 
-# 🗣️ Text-to-Speech Installation (Piper)
+# ⚙️ Installation & Setup
+
+Führe folgende Schritte aus, um das System vollständig einzurichten.
+
+## 🗣️ Text-to-Speech Installation (Piper)
 
 Wir nutzen **Piper TTS**, eine schnelle und lokale Text-zu-Sprache Engine für den Raspberry Pi.
 
 Führe folgende Schritte aus, um Piper sowie die deutsche und griechische Stimme zu installieren:
 
-## 1. Piper herunterladen & installieren
+### 1. Piper herunterladen & installieren
 
 ```bash
 # Ordner erstellen
@@ -46,7 +53,7 @@ wget https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_aarch
 tar -xvf piper_linux_aarch64.tar.gz
 ```
 
-## 2. Stimmen herunterladen
+### 2. Stimmen herunterladen
 
 ### 🇩🇪 Deutsch (Thorsten)
 ```bash
@@ -60,7 +67,7 @@ wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/el/el_GR/rapunze
 wget https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/el/el_GR/rapunzelina/medium/el_GR-rapunzelina-medium.onnx.json
 ```
 
-## 3. Testen
+### 3. Testen
 
 Stelle sicher, dass du im Ordner `~/piper_tts` bist.
 
@@ -75,11 +82,11 @@ echo "Γεια σου, τι κάνεις;" | ./piper/piper --model el_GR-rapunze
 ```
 
 
-# 🔊 Audio Setup (MAX98357A & Raspberry Pi)
+## 🔊 Audio Setup (MAX98357A & Raspberry Pi)
 
 Diese Anleitung beschreibt die Installation eines **MAX98357A I2S Mono-Verstärkers** an einem Raspberry Pi (getestet mit RPi 4).
 
-## 1. Hardware-Verkabelung
+### 1. Hardware-Verkabelung
 
 Der Verstärker wird über den I2S-Bus (Digital Audio) angeschlossen.
 **Wichtig:** Die Stiftleiste am Verstärker-Board muss verlötet sein, einfaches Einstecken reicht nicht für eine stabile Datenverbindung!
@@ -94,9 +101,9 @@ Der Verstärker wird über den I2S-Bus (Digital Audio) angeschlossen.
 
 > **Hinweis:** Die Pins *SD* und *GAIN* am Verstärker bleiben leer (nicht verbunden).
 
-## 2. Software-Konfiguration
+### 2. Software-Konfiguration
 
-### A. Treiber aktivieren & Onboard-Sound deaktivieren
+#### A. Treiber aktivieren & Onboard-Sound deaktivieren
 
 Öffne die Konfigurationsdatei:
 
@@ -131,7 +138,7 @@ sudo reboot
 
 ```
 
-### B. Soundkarte prüfen
+#### B. Soundkarte prüfen
 
 Nach dem Neustart prüfen, ob die Karte erkannt wurde und welche Nummer sie hat:
 
@@ -145,7 +152,7 @@ Suche nach dem Eintrag `snd_rpi_hifiberry_dac`.
 * Beim Raspberry Pi Zero/3 ist es oft **Card 0**.
 * Beim Raspberry Pi 4 ist es oft **Card 2** (da HDMI Audio 0 und 1 belegt).
 
-### C. Software-Lautstärkeregler einrichten (/etc/asound.conf)
+#### C. Software-Lautstärkeregler einrichten (/etc/asound.conf)
 
 Da der Verstärker keinen Hardware-Mixer hat, muss ein virtueller Regler ("Softvol") erstellt werden.
 
@@ -184,9 +191,9 @@ ctl.!default {
 
 Speichern und schließen.
 
-## 3. Lautstärke einstellen & Testen
+### 3. Lautstärke einstellen & Testen
 
-### Regler initialisieren
+#### Regler initialisieren
 
 Der Lautstärkeregler erscheint erst, nachdem einmal Audio abgespielt wurde. Führe diesen Test kurz aus:
 
@@ -195,7 +202,7 @@ speaker-test -c2 -t wav -l 1
 
 ```
 
-### Lautstärke anpassen
+#### Lautstärke anpassen
 
 Nun kannst du die Lautstärke regeln:
 
@@ -211,7 +218,7 @@ alsamixer
 
 
 
-### MP3 / Stream testen
+#### MP3 / Stream testen
 
 Für einen echten Musik-Test installiere `mpg123`:
 
@@ -227,7 +234,7 @@ mpg123 http://wdr-1live-live.icecast.wdr.de/wdr/1live/live/mp3/128/stream.mp3
 
 ```
 
-## 4. Troubleshooting
+### 4. Troubleshooting
 
 * **Nur Knacken/Rattern zu hören?**
 * Prüfe die Verkabelung, insbesondere **Pin 40 (DIN)** und **Pin 12 (BCLK)**. Ein Wackelkontakt hier klingt wie ein Maschinengewehr.
@@ -242,11 +249,11 @@ mpg123 http://wdr-1live-live.icecast.wdr.de/wdr/1live/live/mp3/128/stream.mp3
 * Lautstärke im `alsamixer` reduzieren (max 90%).
 * Prüfen, ob die Stromversorgung des Pi stabil ist (offizielles Netzteil empfohlen).
 
-# 🔑 API Setup
+## 🔑 API Setup
 
 Dieses Projekt nutzt externe APIs für die Texterkennung und -verbesserung. Hier erfährst du, wie du die nötigen Schlüssel erhältst und einrichtest.
 
-## 1. Google Cloud Vision API (für OCR)
+### 1. Google Cloud Vision API (für OCR)
 
 Wir nutzen die Google Cloud Vision API für präzise Texterkennung.
 
@@ -260,7 +267,7 @@ Wir nutzen die Google Cloud Vision API für präzise Texterkennung.
 8.  Benenne diese Datei um in `google_cloud_credentials.json`.
 9.  Kopiere sie in das Hauptverzeichnis dieses Projekts (z. B. `/home/kimon/pi-blind-reader/`).
 
-## 2. OpenAI API (für Textkorrektur)
+### 2. OpenAI API (für Textkorrektur)
 
 OpenAI wird genutzt, um fehlerhaften OCR-Text zu korrigieren und logisch zusammenzusetzen.
 
