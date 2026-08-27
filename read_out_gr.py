@@ -26,9 +26,10 @@ def speak_offline_smart(text):
             length_scale = "1.0"  # Normale Geschwindigkeit für Deutsch
             print("Wähle Deutsche Stimme...")
 
-        # 3. Piper aufrufen
-        # Wir pipen den Text in Piper -> und das Audio direkt in aplay
-        command = f'echo "{text}" | {PATH_PIPER} --model {model} --length-scale {length_scale} --output_raw | aplay -r 22050 -f S16_LE -t raw -'
+        # 3. Piper aufrufen (mit --sentence-silence 0.0 und --noise_w 0.2 für flüssige Übergänge)
+        # Zeilenumbrüche glätten
+        text_clean = " ".join(text.split()).replace('"', '\\"')
+        command = f'echo "{text_clean}" | {PATH_PIPER} --model {model} --length-scale {length_scale} --sentence-silence 0.0 --noise_w 0.2 --output_raw | aplay -r 22050 -f S16_LE -t raw -'
         
         # Befehl ausführen
         subprocess.run(command, shell=True)
