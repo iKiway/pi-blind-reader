@@ -1,5 +1,6 @@
 google_cloud_credentials.json
 captured_images/
+models_piper/*
 __pycache__/
 api_key_open_ai.txt
 google_cloud_credentials.json
