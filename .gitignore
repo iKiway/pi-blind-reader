@@ -5,3 +5,4 @@ __pycache__/
 api_key_open_ai.txt
 google_cloud_credentials.json
 *.wav
+.venv/
