@@ -18,6 +18,7 @@ import sys
 import time
 import json
 import queue
+import hashlib
 import tempfile
 import threading
 import subprocess
@@ -85,6 +86,7 @@ CAMERA_ROTATION = cv2.ROTATE_90_COUNTERCLOCKWISE
 # Audio / TTS-Einstellungen
 USE_WAVENET = False           # True = Hochwertigere WaveNet/Neural2 Stimmen, False = Standard
 ENABLE_AUDIO_FEEDBACK = True  # Akustische Statusansagen ("Dokument bereit...", etc.)
+AUDIO_CACHE_DIR = BASE_DIR / "audio_cache"  # Lokaler WAV-Cache für feste Statusansagen (spart API-Kosten)
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
@@ -138,13 +140,28 @@ def play_audio_file(file_path):
 def speak_status(text):
     """
     Gibt kurze akustische Statusmeldungen für barrierefreie Bedienung aus.
-    Erfolgt direkt via Google Cloud TTS (kurze Synthese ~0.2s).
+    Prüft zuerst, ob eine vorgefertigte/gecachte WAV-Datei in 'audio_cache/' existiert.
+    Nur wenn sie nicht existiert, wird die Google Cloud TTS API aufgerufen und die
+    WAV-Datei dauerhaft für zukünftige Aufrufe gespeichert (spart API-Kosten & Latenz).
     """
     print(f"[Statusansage] {text}")
     if not ENABLE_AUDIO_FEEDBACK:
         return
 
     try:
+        AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # Eindeutiger Hash des Textes + lesbarer Präfix
+        text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
+        safe_prefix = "".join(c for c in text[:24] if c.isalnum() or c in (" ", "_", "-")).strip().replace(" ", "_")
+        cache_file = AUDIO_CACHE_DIR / f"{safe_prefix}_{text_hash}.wav"
+
+        # 1. Cache-Treffer: Direkt lokal ohne API-Aufruf abspielen
+        if cache_file.is_file():
+            play_audio_file(cache_file)
+            return
+
+        # 2. Cache-Miss: Einmalig über Google TTS erzeugen und dauerhaft als WAV speichern
+        print(f"[Audio-Cache] Generiere und speichere neue Statusansage: {cache_file.name}")
         client = texttospeech.TextToSpeechClient()
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
@@ -157,16 +174,11 @@ def speak_status(text):
         response = client.synthesize_speech(
             input=synthesis_input, voice=voice, audio_config=audio_config
         )
-        
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_name = tmp.name
-            tmp.write(response.audio_content)
 
-        play_audio_file(tmp_name)
-        try:
-            os.remove(tmp_name)
-        except OSError:
-            pass
+        with open(cache_file, "wb") as f:
+            f.write(response.audio_content)
+
+        play_audio_file(cache_file)
     except Exception as e:
         print(f"[Warnung] Statusansage konnte nicht wiedergegeben werden: {e}")
 
