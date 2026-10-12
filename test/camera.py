@@ -17,13 +17,50 @@ from picamera2.outputs import FileOutput
 from libcamera import controls
 
 PAGE = """\
+<!DOCTYPE html>
 <html>
 <head>
-<title>picamera2 MJPEG streaming demo</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Picamera2 MJPEG Streaming Demo</title>
+<style>
+  body {
+    margin: 0;
+    padding: 20px;
+    background-color: #1e1e1e;
+    color: #f0f0f0;
+    font-family: system-ui, -apple-system, sans-serif;
+    text-align: center;
+  }
+  h1 {
+    margin-bottom: 6px;
+  }
+  p {
+    margin-top: 0;
+    margin-bottom: 16px;
+    color: #aaa;
+  }
+  .stream-container {
+    display: inline-block;
+    max-width: 95vw;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+  }
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+</style>
 </head>
 <body>
 <h1>Picamera2 MJPEG Streaming Demo</h1>
-<img src="stream.mjpg" width="1280" height="720" />
+<p>Auflösung: {width} &times; {height} (Originalauflösung / maximaler Weitwinkel)</p>
+<div class="stream-container">
+  <img src="stream.mjpg" alt="Live Camera Stream" />
+</div>
 </body>
 </html>
 """
@@ -47,9 +84,10 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_header('Location', '/index.html')
             self.end_headers()
         elif self.path == '/index.html':
-            content = PAGE.encode('utf-8')
+            page_html = PAGE.replace('{width}', str(sensor_resolution[0])).replace('{height}', str(sensor_resolution[1]))
+            content = page_html.encode('utf-8')
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
@@ -86,7 +124,12 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 
 
 picam2 = Picamera2()
-config = picam2.create_video_configuration(main={"size": (1920, 1080), "format": "RGB888"})
+# Native Sensor-Auflösung abfragen (volles Sichtfeld / maximaler Weitwinkel ohne Crop)
+sensor_resolution = picam2.sensor_resolution
+config = picam2.create_video_configuration(
+    main={"size": sensor_resolution, "format": "RGB888"},
+    sensor={"output_size": sensor_resolution}
+)
 picam2.configure(config)
 output = StreamingOutput()
 picam2.start_recording(JpegEncoder(), FileOutput(output))
@@ -111,6 +154,7 @@ try:
     
     print("=" * 50)
     print("Camera Server gestartet!")
+    print(f"Sensor-Auflösung: {sensor_resolution[0]}x{sensor_resolution[1]} (Original / maximaler Weitwinkel)")
     print(f"Öffne im Browser: http://{ip_address}:8000")
     print("=" * 50)
     
