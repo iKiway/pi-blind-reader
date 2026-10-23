@@ -57,7 +57,7 @@ PAGE = """\
 </head>
 <body>
 <h1>Picamera2 MJPEG Streaming Demo</h1>
-<p>Auflösung: {width} &times; {height} (Originalauflösung / maximaler Weitwinkel)</p>
+<p>Auflösung: {width} &times; {height} (Pi Cam 2 Originalauflösung &ndash; 4:3)</p>
 <div class="stream-container">
   <img src="stream.mjpg" alt="Live Camera Stream" />
 </div>
@@ -124,8 +124,20 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 
 
 picam2 = Picamera2()
-# Native Sensor-Auflösung abfragen (volles Sichtfeld / maximaler Weitwinkel ohne Crop)
-sensor_resolution = picam2.sensor_resolution
+
+# Originalauflösung der Raspberry Pi Camera Module 2 (Sony IMX219): 3280 x 2464 (4:3 Format, kein 16:9)
+PI_CAM_2_RESOLUTION = (3280, 2464)
+
+# Native Sensor-Auflösung prüfen: Falls die Kamera 4:3 meldet, übernehmen wir sie, sonst Pi Cam 2 Standard (3280, 2464)
+sensor_resolution = PI_CAM_2_RESOLUTION
+try:
+    if hasattr(picam2, "sensor_resolution") and picam2.sensor_resolution:
+        w, h = picam2.sensor_resolution
+        if abs((w / h) - (4 / 3)) < 0.05:
+            sensor_resolution = (w, h)
+except Exception:
+    pass
+
 config = picam2.create_video_configuration(
     main={"size": sensor_resolution, "format": "RGB888"},
     sensor={"output_size": sensor_resolution}
@@ -134,8 +146,11 @@ picam2.configure(config)
 output = StreamingOutput()
 picam2.start_recording(JpegEncoder(), FileOutput(output))
 
-# Aktiviere Continuous Autofokus
-picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+# Autofokus aktivieren (falls hardwareseitig unterstützt; Standard Pi Cam 2 hat Fixfokus)
+try:
+    picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+except Exception:
+    pass
 
 try:
     address = ('', 8000)
@@ -154,7 +169,7 @@ try:
     
     print("=" * 50)
     print("Camera Server gestartet!")
-    print(f"Sensor-Auflösung: {sensor_resolution[0]}x{sensor_resolution[1]} (Original / maximaler Weitwinkel)")
+    print(f"Sensor-Auflösung: {sensor_resolution[0]}x{sensor_resolution[1]} (Pi Cam 2 Originalauflösung / 4:3)")
     print(f"Öffne im Browser: http://{ip_address}:8000")
     print("=" * 50)
     

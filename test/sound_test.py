@@ -2,32 +2,31 @@
 # -*- coding: utf-8 -*-
 """
 Sound- und Sprachtest für Raspberry Pi (Google Cloud Text-to-Speech)
+Optimiert für MAX98357A I2S Mono-Verstärker
 
-Funktionen:
-- Auswahl zwischen Deutsch und Griechisch (sowie beide nacheinander).
-- Vorlesen eines mehrsätzigen Testtexts mit Google Cloud TTS (wie in vorlesen_pi_google.py).
-- Live-Lautstärkeregelung: Während des Vorlesens kann die Lautstärke mit 'w' (lauter)
-  und 's' (leiser) sowie 'q' (abbrechen) direkt angepasst werden!
-  * Auf Linux/Raspberry Pi: Direkt über ALSA-Mixer ('amixer').
-  * Auf Windows: Über Windows Multimedia-Lautstärke-Events.
+Warum dieses Skript auf dem MAX98357A funktioniert:
+- Der MAX98357A ist ein reiner I2S-DAC und besitzt KEINEN internen Hardware-Mixer.
+  Klassische 'amixer'-Befehle schlagen daher standardmäßig fehl.
+- Dieses Skript implementiert eine softwareseitige Echtzeit-PCM-Lautstärkeregelung:
+  Die 16-Bit-Audiodaten werden in 50ms-Blöcken direkt in Python im Speicher skaliert
+  und per Pipe an 'aplay' übergeben.
+- Tastensteuerung während des Vorlesens:
+  * 'w' / 'W' = Lauter (+5%)
+  * 's' / 'S' = Leiser (-5%)
+  * 'q' / 'Q' = Wiedergabe sofort stoppen
 - Automatisches Caching / Speichern als .wav Datei:
-  * Beim 1. Aufruf: Über Google Cloud TTS generiert und dauerhaft als .wav gespeichert.
-  * Bei wiederholtem Aufruf: Sofortiges lokales Abspielen der .wav Datei ohne erneute
-    API-Nutzung (spart Latenz, Internet-Traffic und API-Kosten).
-- Kann interaktiv über das Terminalmenü oder per CLI-Parameter (--lang de/el, --force)
-  gesteuert werden.
-- Unterstützt direkte ALSA-Wiedergabe ('aplay') auf dem Raspberry Pi sowie Winsound-
-  Fallback für Windows-Tests.
+  * 1. Aufruf: Über Google Cloud TTS generiert und dauerhaft als .wav gespeichert.
+  * Wiederholter Aufruf: Sofortiges Abspielen der .wav Datei ohne API-Aufruf (keine Kosten/Internet).
+- Unterstützt Deutsch und Griechisch (sowie beide nacheinander).
 """
 
 import os
 import sys
-import re
+import wave
 import time
 import argparse
 import subprocess
 import warnings
-import threading
 from pathlib import Path
 
 # Terminal-Encoding für Windows & Linux absichern
@@ -57,16 +56,15 @@ try:
 except ImportError:
     HAS_WINSOUND = False
 
-# Windows Lautstärkeregelung via ctypes
+# Windows Tastaturabfrage via msvcrt
 if sys.platform.startswith("win"):
     try:
-        import ctypes
         import msvcrt
-        HAS_WIN_VOLUME = True
+        HAS_MSVCRT = True
     except ImportError:
-        HAS_WIN_VOLUME = False
+        HAS_MSVCRT = False
 else:
-    HAS_WIN_VOLUME = False
+    HAS_MSVCRT = False
 
 
 # ==============================================================================
@@ -76,7 +74,7 @@ else:
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent if (BASE_DIR.parent / "vorlesen_pi_google.py").is_file() else BASE_DIR
 
-# Lokales Cache-Verzeichnis für erzeugte WAV-Dateien (geteilt mit vorlesen_pi_google.py)
+# Lokales Cache-Verzeichnis für erzeugte WAV-Dateien
 AUDIO_CACHE_DIR = PROJECT_ROOT / "audio_cache"
 
 # Mögliche Speicherorte der Google Cloud Credentials
@@ -102,114 +100,47 @@ def init_credentials():
 
 
 # ==============================================================================
-# --- LAUTSTÄRKEREGELUNG (ALSA AUF PI / WINDOWS) ---
+# --- ECHTZEIT-PCM-LAUTSTÄRKESKALIERUNG (FÜR MAX98357A) ---
 # ==============================================================================
 
-_DETECTED_ALSA_CONTROL = None
-_ESTIMATED_VOLUME = 85  # Standard-Lautstärke in Prozent
+# Standard-Lautstärke: 80% (0.80)
+# HINWEIS: 100% führt beim MAX98357A 3W-Verstärker leicht zu Clipping/Verzerrungen.
+# 80-85% liefert den saubersten Klang.
+CURRENT_VOLUME = 0.80
 
+try:
+    import audioop
 
-def get_active_alsa_control():
-    """
-    Ermittelt den verfügbaren ALSA-Lautstärkeregler.
-    Standard auf Raspberry Pi mit Softvol ist 'Master', sonst 'PCM', 'Headphone' etc.
-    """
-    global _DETECTED_ALSA_CONTROL
-    if _DETECTED_ALSA_CONTROL:
-        return _DETECTED_ALSA_CONTROL
+    def scale_pcm_chunk(chunk_bytes: bytes, volume_factor: float) -> bytes:
+        """Skaliert 16-Bit PCM-Audiodaten in C (blitzschnell via audioop)."""
+        factor = max(0.0, min(1.2, volume_factor))
+        return audioop.mul(chunk_bytes, 2, factor)
 
-    if not sys.platform.startswith("linux"):
-        return "Master"
+except ImportError:
+    import numpy as np
 
-    candidates = ["Master", "PCM", "Headphone", "Speaker", "Digital", "Playback"]
-    for ctrl in candidates:
-        try:
-            res = subprocess.run(
-                ["amixer", "sget", ctrl],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False
-            )
-            if res.returncode == 0:
-                _DETECTED_ALSA_CONTROL = ctrl
-                return ctrl
-        except Exception:
-            break
-
-    _DETECTED_ALSA_CONTROL = "Master"
-    return "Master"
-
-
-def get_current_volume() -> int:
-    """Liest die aktuelle Lautstärke (in Prozent) aus oder nutzt den Schätzwert."""
-    global _ESTIMATED_VOLUME
-    if sys.platform.startswith("linux"):
-        ctrl = get_active_alsa_control()
-        try:
-            res = subprocess.run(
-                ["amixer", "sget", ctrl],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False
-            )
-            if res.returncode == 0:
-                matches = re.findall(r"\[(\d+)%\]", res.stdout)
-                if matches:
-                    _ESTIMATED_VOLUME = int(matches[0])
-                    return _ESTIMATED_VOLUME
-        except Exception:
-            pass
-    return _ESTIMATED_VOLUME
-
-
-def change_volume(step_percent: int) -> int:
-    """
-    Ändert die Lautstärke um step_percent (z.B. +5 oder -5).
-    - Raspberry Pi / Linux: Direkt via ALSA ('amixer sset <ctrl> X%+/-')
-    - Windows: Sendet VK_VOLUME_UP / VK_VOLUME_DOWN Events
-    Gibt die neue Lautstärke in Prozent zurück.
-    """
-    global _ESTIMATED_VOLUME
-
-    new_est = max(0, min(100, _ESTIMATED_VOLUME + step_percent))
-    _ESTIMATED_VOLUME = new_est
-
-    if sys.platform.startswith("linux"):
-        ctrl = get_active_alsa_control()
-        sign = "+" if step_percent > 0 else "-"
-        abs_step = abs(step_percent)
-
-        # Versuche zuerst mit -M (Mapped volume wie alsamixer)
-        cmd = ["amixer", "-M", "sset", ctrl, f"{abs_step}%{sign}"]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-        if res.returncode != 0:
-            cmd = ["amixer", "sset", ctrl, f"{abs_step}%{sign}"]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-
-        if res.returncode == 0:
-            matches = re.findall(r"\[(\d+)%\]", res.stdout)
-            if matches:
-                _ESTIMATED_VOLUME = int(matches[0])
-                return _ESTIMATED_VOLUME
-
-    elif HAS_WIN_VOLUME:
-        vk = 0xAF if step_percent > 0 else 0xAE  # VK_VOLUME_UP / VK_VOLUME_DOWN
-        presses = max(1, abs(step_percent) // 2)
-        for _ in range(presses):
-            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
-
-    return _ESTIMATED_VOLUME
+    def scale_pcm_chunk(chunk_bytes: bytes, volume_factor: float) -> bytes:
+        """Fallback über NumPy, falls audioop nicht vorhanden ist."""
+        factor = max(0.0, min(1.2, volume_factor))
+        arr = np.frombuffer(chunk_bytes, dtype=np.int16)
+        scaled = np.clip(arr * factor, -32768, 32767).astype(np.int16)
+        return scaled.tobytes()
 
 
 def format_volume_bar(percent: int) -> str:
-    """Erzeugt eine visuelle Lautstärkeleiste, z.B. '[########..]  80%'."""
+    """Erzeugt eine universelle Lautstärkeleiste, z.B. '[########..]  80%'."""
     filled = max(0, min(10, int(percent / 10)))
     empty = 10 - filled
     bar = "#" * filled + "." * empty
     return f"[{bar}] {percent:>3}%"
+
+
+def set_volume_relative(step_percent: int) -> float:
+    """Erhöht oder verringert die globale Lautstärke um step_percent."""
+    global CURRENT_VOLUME
+    new_vol = CURRENT_VOLUME + (step_percent / 100.0)
+    CURRENT_VOLUME = max(0.0, min(1.0, round(new_vol, 2)))
+    return CURRENT_VOLUME
 
 
 # ==============================================================================
@@ -225,8 +156,8 @@ TEST_CONFIG = {
         "voice_name": "de-DE-Wavenet-C" if USE_WAVENET else "de-DE-Standard-A",
         "filename": "sound_test_deutsch.wav",
         "text": (
-            "Guten Tag! Dies ist ein Sound- und Sprachtest für den Raspberry Pi mit der Google Cloud Text-to-Speech API. "
-            "Das Audiosystem, der Lautsprecher und die Tonausgabe funktionieren einwandfrei. "
+            "Guten Tag! Dies ist ein Sound- und Sprachtest für den Raspberry Pi mit dem MAX98357A I2S Verstärker. "
+            "Das Audiosystem, die Lautstärkeregelung und die Sprachausgabe funktionieren einwandfrei. "
             "Diese Audiodatei wurde nun als WAV-Datei auf dem Gerät gespeichert. "
             "Bei zukünftigen Tests wird sie direkt ohne erneuten API-Aufruf abgespielt."
         )
@@ -237,8 +168,8 @@ TEST_CONFIG = {
         "voice_name": "el-GR-Wavenet-A" if USE_WAVENET else "el-GR-Standard-A",
         "filename": "sound_test_griechisch.wav",
         "text": (
-            "Γεια σας! Αυτός είναι ένας έλεγχος ήχου και ομιλίας για το Raspberry Pi με την υπηρεσία Google Cloud Text-to-Speech. "
-            "Το ηχητικό σύστημα, το ηχείο και η αναπαραγωγή ήχου λειτουργούν κανονικά. "
+            "Γεια σας! Αυτός είναι ένας έλεγχος ήχου και ομιλίας για το Raspberry Pi με τον ενισχυτή MAX98357A. "
+            "Το ηχητικό σύστημα, η ρύθμιση έντασης και η αναπαραγωγή ήχου λειτουργούν κανονικά. "
             "Αυτό το αρχείο ήχου έχει αποθηκευτεί ως αρχείο WAV στη συσκευή. "
             "Σε μελλοντικούς ελέγχους θα αναπαράγεται απευθείας χωρίς νέα κλήση του API."
         )
@@ -247,157 +178,228 @@ TEST_CONFIG = {
 
 
 # ==============================================================================
-# --- AUDIO-WIEDERGABE MIT LIVE-LAUTSTÄRKEREGELUNG ---
+# --- AUDIO-WIEDERGABE MIT LIVE-SOFTWARE-STREAMING ---
 # ==============================================================================
 
-def play_audio_file(file_path: Path):
+def play_audio_file(file_path: Path) -> bool:
     """
-    Spielt eine WAV-Audiodatei ab und erlaubt während der Wiedergabe die
-    Lautstärkeregelung mit:
-      - 'w' oder 'W': Lauter (+5%)
-      - 's' oder 'S': Leiser (-5%)
-      - 'q' oder 'Q': Vorzeitiger Abbruch
+    Spielt die WAV-Datei ab und skaliert die Audio-Samples in Echtzeit.
+    
+    Da der MAX98357A keinen Hardware-Lautstärkeregler besitzt, wird der Audiostream
+    in 50ms-Häppchen aufgeteilt. Jeder Block wird mit der aktuellen Lautstärke
+    skaliert, bevor er an den Audioplayer übergeben wird.
+    
+    Tasten während der Wiedergabe:
+      - 'w' / 'W': Lauter (+5%)
+      - 's' / 'S': Leiser (-5%)
+      - 'q' / 'Q': Wiedergabe sofort stoppen
     """
+    global CURRENT_VOLUME
+
     if not file_path.is_file():
-        print(f"[Fehler] Audiodatei nicht gefunden: {file_path}")
+        print(f"[Fehler] Datei nicht gefunden: {file_path}")
         return False
 
-    current_vol = get_current_volume()
-    print(f"\n▶️  Spiele Audio ab: {file_path.name}")
+    try:
+        wav_in = wave.open(str(file_path), "rb")
+    except Exception as e:
+        print(f"[Fehler] Konnte WAV-Datei nicht öffnen: {e}")
+        return False
+
+    framerate = wav_in.getframerate()
+    channels = wav_in.getnchannels()
+    sample_width = wav_in.getsampwidth()
+    total_frames = wav_in.getnframes()
+    bytes_per_frame = channels * sample_width
+
+    # 50 Millisekunden pro Audio-Block (~1200 Frames bei 24kHz)
+    chunk_frames = max(256, int(framerate * 0.05))
+
+    # Player-Befehl zusammenstellen
+    if sys.platform.startswith("linux"):
+        # aplay liest rohes PCM direkt von stdin
+        player_cmd = [
+            "aplay",
+            "-q",
+            "-r", str(framerate),
+            "-f", "S16_LE",
+            "-c", str(channels),
+            "-t", "raw",
+            "-"
+        ]
+    elif sys.platform.startswith("win"):
+        # ffplay für Windows-Entwicklung (falls vorhanden)
+        player_cmd = [
+            "ffplay",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel", "quiet",
+            "-f", "s16le",
+            "-ar", str(framerate),
+            "-ch_layout", "mono" if channels == 1 else "stereo",
+            "-i", "-"
+        ]
+    else:
+        player_cmd = [
+            "ffplay",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel", "quiet",
+            "-f", "s16le",
+            "-ar", str(framerate),
+            "-ch_layout", "mono" if channels == 1 else "stereo",
+            "-i", "-"
+        ]
+
+    print(f"\n▶️  Wiedergabe: {file_path.name}")
     print("   ┌──────────────────────────────────────────────────────────┐")
-    print("   │  Tasten während des Vorlesens:                           │")
+    print("   │  MAX98357A Live-Regelung während des Vorlesens:          │")
     print("   │  [W] = Lauter (+5%)   [S] = Leiser (-5%)   [Q] = Stop    │")
     print("   └──────────────────────────────────────────────────────────┘")
-    print(f"   Aktuelle Lautstärke: {format_volume_bar(current_vol)}")
+    vol_pct = int(round(CURRENT_VOLUME * 100))
+    print(f"   Aktuelle Lautstärke: {format_volume_bar(vol_pct)}")
 
-    if sys.platform.startswith("linux"):
-        # Auf Raspberry Pi / Linux asynchron mit 'aplay' starten
-        proc = subprocess.Popen(["aplay", "-q", str(file_path)])
-
-        if sys.stdin.isatty():
-            import select
-            import termios
-            import tty
-
-            fd = sys.stdin.fileno()
-            old_term = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                while proc.poll() is None:
-                    # Nicht-blockierend auf Tastendruck prüfen
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if rlist:
-                        ch = sys.stdin.read(1)
-                        if ch.lower() == 'w':
-                            vol = change_volume(+5)
-                            sys.stdout.write(f"\r   [Lauter +5%]  {format_volume_bar(vol)}        ")
-                            sys.stdout.flush()
-                        elif ch.lower() == 's':
-                            vol = change_volume(-5)
-                            sys.stdout.write(f"\r   [Leiser -5%]  {format_volume_bar(vol)}        ")
-                            sys.stdout.flush()
-                        elif ch.lower() == 'q' or ch == '\x1b':
-                            proc.terminate()
-                            sys.stdout.write("\n   [Abbruch] Wiedergabe durch Benutzer gestoppt.\n")
-                            sys.stdout.flush()
-                            break
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-        else:
-            proc.wait()
-
-        return proc.returncode in (0, None)
-
-    elif HAS_WINSOUND:
-        # Windows: Playback in Thread ausführen und msvcrt.kbhit() abfragen
-        stop_requested = False
-        playback_thread = threading.Thread(
-            target=winsound.PlaySound,
-            args=(str(file_path), winsound.SND_FILENAME),
-            daemon=True
+    # Player-Subprozess mit Standard-Input-Pipe starten
+    try:
+        proc = subprocess.Popen(
+            player_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
-        playback_thread.start()
+    except Exception as e:
+        print(f"[Warnung] Player konnte nicht gestartet werden: {e}")
+        # Notfall-Fallback auf Standard-Wiedergabe
+        if HAS_WINSOUND:
+            winsound.PlaySound(str(file_path), winsound.SND_FILENAME)
+            return True
+        return False
 
-        while playback_thread.is_alive():
-            if msvcrt.kbhit():
-                ch = msvcrt.getch()
-                if isinstance(ch, bytes):
-                    try:
-                        ch = ch.decode("utf-8", errors="ignore")
-                    except Exception:
-                        ch = ""
-                if ch.lower() == 'w':
-                    vol = change_volume(+5)
-                    sys.stdout.write(f"\r   [Lauter +5%]  {format_volume_bar(vol)}        ")
-                    sys.stdout.flush()
-                elif ch.lower() == 's':
-                    vol = change_volume(-5)
-                    sys.stdout.write(f"\r   [Leiser -5%]  {format_volume_bar(vol)}        ")
-                    sys.stdout.flush()
-                elif ch.lower() == 'q' or ch == '\x1b':
-                    winsound.PlaySound(None, 0)  # Bricht PlaySound auf Windows sofort ab
-                    stop_requested = True
-                    sys.stdout.write("\n   [Abbruch] Wiedergabe durch Benutzer gestoppt.\n")
-                    sys.stdout.flush()
-                    break
-            time.sleep(0.04)
+    # Vorbereitung für nicht-blockierende Tastatureingabe
+    old_term_settings = None
+    is_linux_tty = sys.platform.startswith("linux") and sys.stdin.isatty()
+    if is_linux_tty:
+        import termios
+        import tty
+        import select
+        fd = sys.stdin.fileno()
+        try:
+            old_term_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            old_term_settings = None
 
-        if not stop_requested:
+    frames_sent = 0
+    start_time = time.time()
+    aborted = False
+
+    try:
+        while True:
+            raw_chunk = wav_in.readframes(chunk_frames)
+            if not raw_chunk:
+                break
+
+            n_frames = len(raw_chunk) // bytes_per_frame
+            frames_sent += n_frames
+
+            # Echtzeit-Taktsynchronisation (halten ~50ms Puffer vor der Hardware)
+            expected_elapsed = frames_sent / framerate
+            now = time.time() - start_time
+            lead_time = expected_elapsed - now
+            wait_time = lead_time - 0.05
+
+            # Tastenabfrage während der Wartezeit
+            if is_linux_tty:
+                import select
+                timeout = max(0.0, min(0.08, wait_time))
+                rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+                if rlist:
+                    ch = sys.stdin.read(1)
+                    if ch.lower() == 'w':
+                        set_volume_relative(+5)
+                        v_pct = int(round(CURRENT_VOLUME * 100))
+                        sys.stdout.write(f"\r   [Lauter +5%]  {format_volume_bar(v_pct)}       ")
+                        sys.stdout.flush()
+                    elif ch.lower() == 's':
+                        set_volume_relative(-5)
+                        v_pct = int(round(CURRENT_VOLUME * 100))
+                        sys.stdout.write(f"\r   [Leiser -5%]  {format_volume_bar(v_pct)}       ")
+                        sys.stdout.flush()
+                    elif ch.lower() == 'q' or ch == '\x1b':
+                        aborted = True
+                        sys.stdout.write("\n   [Abbruch] Wiedergabe durch Benutzer beendet.\n")
+                        sys.stdout.flush()
+                        break
+            elif HAS_MSVCRT:
+                # Windows Tastaturabfrage
+                if wait_time > 0:
+                    time.sleep(min(0.05, wait_time))
+                if msvcrt.kbhit():
+                    ch = msvcrt.getch()
+                    if isinstance(ch, bytes):
+                        try:
+                            ch = ch.decode("utf-8", errors="ignore")
+                        except Exception:
+                            ch = ""
+                    if ch.lower() == 'w':
+                        set_volume_relative(+5)
+                        v_pct = int(round(CURRENT_VOLUME * 100))
+                        sys.stdout.write(f"\r   [Lauter +5%]  {format_volume_bar(v_pct)}       ")
+                        sys.stdout.flush()
+                    elif ch.lower() == 's':
+                        set_volume_relative(-5)
+                        v_pct = int(round(CURRENT_VOLUME * 100))
+                        sys.stdout.write(f"\r   [Leiser -5%]  {format_volume_bar(v_pct)}       ")
+                        sys.stdout.flush()
+                    elif ch.lower() == 'q' or ch == '\x1b':
+                        aborted = True
+                        sys.stdout.write("\n   [Abbruch] Wiedergabe durch Benutzer beendet.\n")
+                        sys.stdout.flush()
+                        break
+            else:
+                if wait_time > 0:
+                    time.sleep(min(0.05, wait_time))
+
+            # Audioblock in Echtzeit mit der aktuellen Lautstärke skalieren
+            scaled_chunk = scale_pcm_chunk(raw_chunk, CURRENT_VOLUME)
+
+            # An Player-Pipe senden
+            try:
+                proc.stdin.write(scaled_chunk)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                break
+
+    finally:
+        # Terminal-Einstellungen sauber wiederherstellen
+        if old_term_settings is not None:
+            import termios
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term_settings)
+            except Exception:
+                pass
+
+        wav_in.close()
+
+        if aborted:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        else:
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.close()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             sys.stdout.write("\n")
             sys.stdout.flush()
-        return True
 
-    else:
-        # Fallback (z.B. macOS mit afplay oder ffplay)
-        cmd = ["aplay", "-q", str(file_path)]
-        for c in [["afplay", str(file_path)], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(file_path)]]:
-            try:
-                subprocess.run([c[0], "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                cmd = c
-                break
-            except Exception:
-                continue
-
-        try:
-            proc = subprocess.Popen(cmd)
-            if sys.stdin.isatty():
-                import select
-                import termios
-                import tty
-
-                fd = sys.stdin.fileno()
-                old_term = termios.tcgetattr(fd)
-                try:
-                    tty.setcbreak(fd)
-                    while proc.poll() is None:
-                        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                        if rlist:
-                            ch = sys.stdin.read(1)
-                            if ch.lower() == 'w':
-                                vol = change_volume(+5)
-                                sys.stdout.write(f"\r   [Lauter +5%]  {format_volume_bar(vol)}        ")
-                                sys.stdout.flush()
-                            elif ch.lower() == 's':
-                                vol = change_volume(-5)
-                                sys.stdout.write(f"\r   [Leiser -5%]  {format_volume_bar(vol)}        ")
-                                sys.stdout.flush()
-                            elif ch.lower() == 'q' or ch == '\x1b':
-                                proc.terminate()
-                                sys.stdout.write("\n   [Abbruch] Wiedergabe gestoppt.\n")
-                                sys.stdout.flush()
-                                break
-                finally:
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-            else:
-                proc.wait()
-            return True
-        except Exception as e:
-            print(f"[Fehler] Player konnte nicht gestartet werden: {e}")
-            return False
+    return True
 
 
 # ==============================================================================
@@ -426,7 +428,7 @@ def generate_tts_wav(text: str, lang_code: str, voice_name: str, output_path: Pa
             name=voice_name
         )
 
-        # LINEAR16 erzeugt unkomprimiertes WAV (PCM 16-bit, 24kHz), ideal für aplay auf dem Pi
+        # LINEAR16 = unkomprimiertes WAV (PCM 16-bit, 24kHz Mono)
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.LINEAR16
         )
@@ -490,7 +492,7 @@ def test_language(lang_key: str, force_regenerate: bool = False):
             print("[Abbruch] Audio konnte nicht erstellt werden.")
             return
 
-    # 2. Audio abspielen mit Live-Lautstärkeregelung
+    # 2. Audio abspielen mit Echtzeit-Software-Lautstärkeregelung
     play_audio_file(wav_path)
     print(f"[Fertig] Test für {config['title']} abgeschlossen.\n")
 
@@ -530,12 +532,13 @@ def print_cache_status():
 
 def interactive_menu():
     """Interaktives Auswahlmenü im Terminal."""
+    global CURRENT_VOLUME
     while True:
-        vol = get_current_volume()
+        vol_pct = int(round(CURRENT_VOLUME * 100))
         print("\n" + "=" * 65)
-        print("  Raspberry Pi Sound- & TTS-Test (Google Cloud Text-to-Speech)")
+        print("  Raspberry Pi Sound- & TTS-Test (MAX98357A I2S Edition)")
         print("=" * 65)
-        print(f"  Aktuelle Lautstärke : {format_volume_bar(vol)}")
+        print(f"  Aktuelle Lautstärke : {format_volume_bar(vol_pct)}")
         print(f"  Speicherort Cache   : {AUDIO_CACHE_DIR.resolve()}")
         print("\nAktueller Cache-Status:")
         print_cache_status()
@@ -549,7 +552,7 @@ def interactive_menu():
         print("  [5] Gespeicherte WAV-Dateien löschen (Cache leeren)")
         print("  [q] Beenden")
         print("=" * 65)
-        print("  Hinweis: Während des Vorlesens kann mit [W] lauter und [S] leiser gestellt werden!")
+        print("  Tipp: Während des Vorlesens kannst du jederzeit mit [W] lauter und [S] leiser stellen!")
 
         try:
             choice = input("\nDeine Auswahl: ").strip().lower()
@@ -565,11 +568,13 @@ def interactive_menu():
             test_language("de")
             test_language("el")
         elif choice in ("w", "+"):
-            new_v = change_volume(+5)
-            print(f"-> Lautstärke erhöht: {format_volume_bar(new_v)}")
+            set_volume_relative(+5)
+            v_pct = int(round(CURRENT_VOLUME * 100))
+            print(f"-> Lautstärke erhöht: {format_volume_bar(v_pct)}")
         elif choice in ("s", "-"):
-            new_v = change_volume(-5)
-            print(f"-> Lautstärke verringert: {format_volume_bar(new_v)}")
+            set_volume_relative(-5)
+            v_pct = int(round(CURRENT_VOLUME * 100))
+            print(f"-> Lautstärke verringert: {format_volume_bar(v_pct)}")
         elif choice == "4":
             print("\nWelche Sprache soll neu über Google API geladen werden?")
             print("  [1] Deutsch")
@@ -594,7 +599,7 @@ def interactive_menu():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Sound- und Sprachtest für Raspberry Pi mit Google Cloud TTS"
+        description="Sound- und Sprachtest für Raspberry Pi mit Google Cloud TTS (optimiert für MAX98357A)"
     )
     parser.add_argument(
         "-l", "--lang",
@@ -611,8 +616,18 @@ def main():
         action="store_true",
         help="Löscht alle gespeicherten Test-WAV-Dateien und beendet das Programm"
     )
+    parser.add_argument(
+        "--volume",
+        type=int,
+        default=80,
+        help="Startlautstärke in Prozent (Standard: 80)"
+    )
 
     args = parser.parse_args()
+
+    # Startlautstärke setzen
+    global CURRENT_VOLUME
+    CURRENT_VOLUME = max(0.0, min(1.0, args.volume / 100.0))
 
     # Wenn Credentials vorhanden sind, kurz initialisieren
     creds = init_credentials()
