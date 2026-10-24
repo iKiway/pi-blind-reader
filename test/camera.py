@@ -10,10 +10,13 @@ import socketserver
 import socket
 from http import server
 from threading import Condition
+import numpy as np
+import simplejpeg
 
 from picamera2 import Picamera2
 from picamera2.encoders import JpegEncoder
 from picamera2.outputs import FileOutput
+from picamera2.request import MappedArray
 from libcamera import controls
 
 PAGE = """\
@@ -142,9 +145,39 @@ config = picam2.create_video_configuration(
     main={"size": sensor_resolution, "format": "RGB888"},
     sensor={"output_size": sensor_resolution}
 )
+class ContiguousJpegEncoder(JpegEncoder):
+    """
+    Subclass von JpegEncoder, die sicherstellt, dass der Bildpuffer C-kontinuierlich ist.
+    Behebt 'ValueError: image must be C contiguous' bei Sensor-Auflösungen wie 3280x2464,
+    bei denen das ISP-Zeilen-Padding (Alignment auf 32 Bytes) nicht-kontinuierliche Strides erzeugt.
+    """
+    def encode_func(self, request, name="main"):
+        fmt = request.config[name]["format"]
+        with MappedArray(request, name) as m:
+            if fmt == "YUV420":
+                width, height = request.config[name]["size"]
+                Y = np.ascontiguousarray(m.array[:height, :width])
+                reshaped = m.array.reshape(
+                    (m.array.shape[0] * 2, m.array.strides[0] // 2)
+                )
+                U = np.ascontiguousarray(reshaped[2 * height : 2 * height + height // 2, : width // 2])
+                V = np.ascontiguousarray(reshaped[2 * height + height // 2 :, : width // 2])
+                return simplejpeg.encode_jpeg_yuv_planes(Y, U, V, self.q)
+
+            if self.colour_space is None:
+                self.colour_space = self.FORMAT_TABLE[request.config[name]["format"]]
+            arr = np.ascontiguousarray(m.array)
+            return simplejpeg.encode_jpeg(
+                arr,
+                quality=self.q,
+                colorspace=self.colour_space,
+                colorsubsampling=self.colour_subsampling,
+            )
+
+
 picam2.configure(config)
 output = StreamingOutput()
-picam2.start_recording(JpegEncoder(), FileOutput(output))
+picam2.start_recording(ContiguousJpegEncoder(), FileOutput(output))
 
 # Autofokus aktivieren (falls hardwareseitig unterstützt; Standard Pi Cam 2 hat Fixfokus)
 try:
