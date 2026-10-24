@@ -126,25 +126,6 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     daemon_threads = True
 
 
-picam2 = Picamera2()
-
-# Originalauflösung der Raspberry Pi Camera Module 2 (Sony IMX219): 3280 x 2464 (4:3 Format, kein 16:9)
-PI_CAM_2_RESOLUTION = (3280, 2464)
-
-# Native Sensor-Auflösung prüfen: Falls die Kamera 4:3 meldet, übernehmen wir sie, sonst Pi Cam 2 Standard (3280, 2464)
-sensor_resolution = PI_CAM_2_RESOLUTION
-try:
-    if hasattr(picam2, "sensor_resolution") and picam2.sensor_resolution:
-        w, h = picam2.sensor_resolution
-        if abs((w / h) - (4 / 3)) < 0.05:
-            sensor_resolution = (w, h)
-except Exception:
-    pass
-
-config = picam2.create_video_configuration(
-    main={"size": sensor_resolution, "format": "RGB888"},
-    sensor={"output_size": sensor_resolution}
-)
 class ContiguousJpegEncoder(JpegEncoder):
     """
     Subclass von JpegEncoder, die sicherstellt, dass der Bildpuffer C-kontinuierlich ist.
@@ -167,14 +148,37 @@ class ContiguousJpegEncoder(JpegEncoder):
             if self.colour_space is None:
                 self.colour_space = self.FORMAT_TABLE[request.config[name]["format"]]
             arr = np.ascontiguousarray(m.array)
+            q = self.q if self.q is not None else 80
             return simplejpeg.encode_jpeg(
                 arr,
-                quality=self.q,
+                quality=q,
                 colorspace=self.colour_space,
                 colorsubsampling=self.colour_subsampling,
             )
 
+# Patcht auch den Standard-JpegEncoder vorsorglich ab
+JpegEncoder.encode_func = ContiguousJpegEncoder.encode_func
 
+
+picam2 = Picamera2()
+
+# Originalauflösung der Raspberry Pi Camera Module 2 (Sony IMX219): 3280 x 2464 (4:3 Format, kein 16:9)
+PI_CAM_2_RESOLUTION = (3280, 2464)
+
+# Native Sensor-Auflösung prüfen: Falls die Kamera 4:3 meldet, übernehmen wir sie, sonst Pi Cam 2 Standard (3280, 2464)
+sensor_resolution = PI_CAM_2_RESOLUTION
+try:
+    if hasattr(picam2, "sensor_resolution") and picam2.sensor_resolution:
+        w, h = picam2.sensor_resolution
+        if abs((w / h) - (4 / 3)) < 0.05:
+            sensor_resolution = (w, h)
+except Exception:
+    pass
+
+config = picam2.create_video_configuration(
+    main={"size": sensor_resolution, "format": "RGB888"},
+    sensor={"output_size": sensor_resolution}
+)
 picam2.configure(config)
 output = StreamingOutput()
 picam2.start_recording(ContiguousJpegEncoder(), FileOutput(output))
