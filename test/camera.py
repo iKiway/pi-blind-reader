@@ -96,39 +96,24 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
 
 def start_camera():
-    global picam2, output, actual_res
+    global picam2, output
     picam2 = Picamera2()
 
-    # Sensor-Modi durchsuchen nach dem größten 4:3-Modus
-    sensor_modes = picam2.sensor_modes
-    max_mode = None
-    max_pixels = 0
+    # IMX219 native 4:3 Sensor-Auflösung
+    width, height = 3280, 2464
 
-    for mode in sensor_modes:
-        w, h = mode["size"]
-        ratio = w / h
-        # Prüfen, ob das Seitenverhältnis ca. 4:3 (1.33) ist
-        if 1.30 <= ratio <= 1.36:
-            pixels = w * h
-            if pixels > max_pixels:
-                max_pixels = pixels
-                max_mode = (w, h)
-
-    # Fallback falls keine Modi geparst wurden:
-    if not max_mode:
-        props = picam2.camera_properties.get("PixelArraySize")
-        max_mode = (props[0], props[1]) if props else (3280, 2464)
-
-    actual_res = max_mode
-    print(f"Erzwinge nativen 4:3-Sensor-Modus: {actual_res[0]}x{actual_res[1]}")
-
-    # Konfiguration mit fixem 4:3 Sensor-Input und Main-Output
+    # 1. Konfiguration mit explizitem 4:3 Sensor-Modus erstellen
     config = picam2.create_still_configuration(
-        main={"size": actual_res, "format": "RGB888"},
-        sensor={"output_size": actual_res}
+        main={"size": (width, height), "format": "RGB888"},
+        sensor={"output_size": (width, height), "bit_depth": 10}
     )
     picam2.configure(config)
+
+    # 2. ISP-Crop explizit auf die volle Fläche setzen (verhindert 16:9 Auto-Crop)
+    picam2.set_controls({"ScalerCrop": (0, 0, width, height)})
+
     picam2.start()
+    print(f"IMX219 läuft im nativen 4:3-Modus ohne Crop: {width}x{height}")
 
     while True:
         buf = io.BytesIO()
