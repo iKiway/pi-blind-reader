@@ -1,22 +1,8 @@
 import io
-import socket
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Condition, Thread
 from picamera2 import Picamera2
-
-
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
-
 
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
@@ -39,7 +25,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
             content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Raspberry Pi Camera Stream (4:3)</title>
+    <title>Raspberry Pi Camera Stream</title>
     <style>
         body {{
             background: #121212;
@@ -50,17 +36,15 @@ class StreamingHandler(BaseHTTPRequestHandler):
             padding: 20px;
         }}
         img {{
-            max-width: 90vw;
-            max-height: 85vh;
-            aspect-ratio: 4 / 3;
-            object-fit: contain;
-            border: 2px solid #444;
+            max-width: 95vw;
+            height: auto;
+            border: 2px solid #333;
             border-radius: 6px;
         }}
     </style>
 </head>
 <body>
-    <h2>Raspberry Pi 4B - Natives 4:3 Sichtfeld ({actual_res[0]}x{actual_res[1]})</h2>
+    <h2>Raspberry Pi 4B - Volle Aufl&ouml;sung Stream</h2>
     <img src="/stream.mjpg" />
 </body>
 </html>""".encode("utf-8")
@@ -99,22 +83,22 @@ def start_camera():
     global picam2, output
     picam2 = Picamera2()
 
-    # IMX219 native 4:3 Sensor-Auflösung
-    width, height = 3280, 2464
+    # Maximale Sensor-Auflösung abfragen und für Stream konfigurieren
+    sensor_res = picam2.camera_properties.get("PixelArraySize")
+    if sensor_res:
+        max_size = (sensor_res[0], sensor_res[1])
+    else:
+        # Fallback falls Property nicht direkt lesbar ist (z. B. Cam v2: 3280x2464)
+        max_size = (3280, 2464)
 
-    # 1. Konfiguration mit explizitem 4:3 Sensor-Modus erstellen
-    config = picam2.create_still_configuration(
-        main={"size": (width, height), "format": "RGB888"},
-        sensor={"output_size": (width, height), "bit_depth": 10}
-    )
+    print(f"Starte Stream mit voller Auflösung: {max_size[0]}x{max_size[1]}")
+
+    # Konfiguration für Standbild/Vollauflösungs-Stream
+    config = picam2.create_still_configuration(main={"size": max_size, "format": "RGB888"})
     picam2.configure(config)
-
-    # 2. ISP-Crop explizit auf die volle Fläche setzen (verhindert 16:9 Auto-Crop)
-    picam2.set_controls({"ScalerCrop": (0, 0, width, height)})
-
     picam2.start()
-    print(f"IMX219 läuft im nativen 4:3-Modus ohne Crop: {width}x{height}")
 
+    # Kontinuierliches Enkodieren als JPEG in den Output-Puffer
     while True:
         buf = io.BytesIO()
         picam2.capture_file(buf, format="jpeg")
@@ -123,22 +107,14 @@ def start_camera():
 
 
 if __name__ == "__main__":
-    PORT = 8000
-    actual_res = (0, 0)
     output = StreamingOutput()
 
     cam_thread = Thread(target=start_camera, daemon=True)
     cam_thread.start()
 
-    ip_address = get_local_ip()
-
-    server = HTTPServer(("", PORT), StreamingHandler)
-
-    print("-" * 50)
-    print(f"Stream verfügbar unter: http://{ip_address}:{PORT}")
-    print("Beenden mit Strg+C")
-    print("-" * 50)
-
+    address = ("", 8000)
+    server = HTTPServer(address, StreamingHandler)
+    print("Server läuft auf Port 8000. Beenden mit Strg+C.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
