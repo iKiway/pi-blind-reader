@@ -7,10 +7,8 @@ from picamera2 import Picamera2
 
 
 def get_local_ip():
-    """Ermittelt die IP-Adresse des Raspberry Pi im lokalen Netzwerk."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # Dummy-Verbindung (sendet keine echten Pakete), um das aktive Interface zu finden
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
     except Exception:
@@ -41,7 +39,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
             content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Raspberry Pi Camera Stream</title>
+    <title>Raspberry Pi Camera Stream (4:3)</title>
     <style>
         body {{
             background: #121212;
@@ -52,15 +50,17 @@ class StreamingHandler(BaseHTTPRequestHandler):
             padding: 20px;
         }}
         img {{
-            max-width: 95vw;
-            height: auto;
-            border: 2px solid #333;
+            max-width: 90vw;
+            max-height: 85vh;
+            aspect-ratio: 4 / 3;
+            object-fit: contain;
+            border: 2px solid #444;
             border-radius: 6px;
         }}
     </style>
 </head>
 <body>
-    <h2>Raspberry Pi 4B - Volle Aufl&ouml;sung Stream</h2>
+    <h2>Raspberry Pi 4B - Natives 4:3 Sichtfeld ({actual_res[0]}x{actual_res[1]})</h2>
     <img src="/stream.mjpg" />
 </body>
 </html>""".encode("utf-8")
@@ -96,18 +96,37 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
 
 def start_camera():
-    global picam2, output
+    global picam2, output, actual_res
     picam2 = Picamera2()
 
-    sensor_res = picam2.camera_properties.get("PixelArraySize")
-    if sensor_res:
-        max_size = (sensor_res[0], sensor_res[1])
-    else:
-        max_size = (3280, 2464)
+    # Sensor-Modi durchsuchen nach dem größten 4:3-Modus
+    sensor_modes = picam2.sensor_modes
+    max_mode = None
+    max_pixels = 0
 
-    print(f"Kamera initialisiert: {max_size[0]}x{max_size[1]}")
+    for mode in sensor_modes:
+        w, h = mode["size"]
+        ratio = w / h
+        # Prüfen, ob das Seitenverhältnis ca. 4:3 (1.33) ist
+        if 1.30 <= ratio <= 1.36:
+            pixels = w * h
+            if pixels > max_pixels:
+                max_pixels = pixels
+                max_mode = (w, h)
 
-    config = picam2.create_still_configuration(main={"size": max_size, "format": "RGB888"})
+    # Fallback falls keine Modi geparst wurden:
+    if not max_mode:
+        props = picam2.camera_properties.get("PixelArraySize")
+        max_mode = (props[0], props[1]) if props else (3280, 2464)
+
+    actual_res = max_mode
+    print(f"Erzwinge nativen 4:3-Sensor-Modus: {actual_res[0]}x{actual_res[1]}")
+
+    # Konfiguration mit fixem 4:3 Sensor-Input und Main-Output
+    config = picam2.create_still_configuration(
+        main={"size": actual_res, "format": "RGB888"},
+        sensor={"output_size": actual_res}
+    )
     picam2.configure(config)
     picam2.start()
 
@@ -120,6 +139,7 @@ def start_camera():
 
 if __name__ == "__main__":
     PORT = 8000
+    actual_res = (0, 0)
     output = StreamingOutput()
 
     cam_thread = Thread(target=start_camera, daemon=True)
@@ -130,7 +150,7 @@ if __name__ == "__main__":
     server = HTTPServer(("", PORT), StreamingHandler)
 
     print("-" * 50)
-    print(f"Stream verfuegbar unter: http://{ip_address}:{PORT}")
+    print(f"Stream verfügbar unter: http://{ip_address}:{PORT}")
     print("Beenden mit Strg+C")
     print("-" * 50)
 
