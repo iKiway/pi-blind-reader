@@ -1,8 +1,24 @@
 import io
+import socket
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Condition, Thread
 from picamera2 import Picamera2
+
+
+def get_local_ip():
+    """Ermittelt die IP-Adresse des Raspberry Pi im lokalen Netzwerk."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Dummy-Verbindung (sendet keine echten Pakete), um das aktive Interface zu finden
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
 
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
@@ -83,22 +99,18 @@ def start_camera():
     global picam2, output
     picam2 = Picamera2()
 
-    # Maximale Sensor-Auflösung abfragen und für Stream konfigurieren
     sensor_res = picam2.camera_properties.get("PixelArraySize")
     if sensor_res:
         max_size = (sensor_res[0], sensor_res[1])
     else:
-        # Fallback falls Property nicht direkt lesbar ist (z. B. Cam v2: 3280x2464)
         max_size = (3280, 2464)
 
-    print(f"Starte Stream mit voller Auflösung: {max_size[0]}x{max_size[1]}")
+    print(f"Kamera initialisiert: {max_size[0]}x{max_size[1]}")
 
-    # Konfiguration für Standbild/Vollauflösungs-Stream
     config = picam2.create_still_configuration(main={"size": max_size, "format": "RGB888"})
     picam2.configure(config)
     picam2.start()
 
-    # Kontinuierliches Enkodieren als JPEG in den Output-Puffer
     while True:
         buf = io.BytesIO()
         picam2.capture_file(buf, format="jpeg")
@@ -107,14 +119,21 @@ def start_camera():
 
 
 if __name__ == "__main__":
+    PORT = 8000
     output = StreamingOutput()
 
     cam_thread = Thread(target=start_camera, daemon=True)
     cam_thread.start()
 
-    address = ("", 8000)
-    server = HTTPServer(address, StreamingHandler)
-    print("Server läuft auf Port 8000. Beenden mit Strg+C.")
+    ip_address = get_local_ip()
+
+    server = HTTPServer(("", PORT), StreamingHandler)
+
+    print("-" * 50)
+    print(f"Stream verfuegbar unter: http://{ip_address}:{PORT}")
+    print("Beenden mit Strg+C")
+    print("-" * 50)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
