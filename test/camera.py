@@ -55,7 +55,7 @@ PAGE = """\
     display: block;
     max-width: 100%;
     height: auto;
-  }
+  }ddds
 </style>
 </head>
 <body>
